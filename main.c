@@ -44,9 +44,7 @@
 #define E32_UART_BAUD  57600        /* harus sesuai bit baud di E32_SPED */
 
 #define AIR_CYCLE_MS  140     /* 1 kiriman + jeda dengar. Turunkan pelan2 jika sudah stabil */
-#define RADIO_Q_MAX   1024    /* batas antrean data periodik */
 #define RADIO_Q_PRIO  2000    /* batas antrean paket penting */
-
 
 #define PIX_BAUD      57600   /* = SERIALx_BAUD 57 di Pixhawk */
 #define E32_BURST     58      /* maks. byte per kiriman ke E32 (= 1 sub-paket radio) */
@@ -332,25 +330,75 @@ static uint8_t Mav_IsPriority(uint32_t id)
                                                             -> 10 + len + 2 (+13) */
 static void Mav_Feed(uint8_t b)
 {
-	if (mav_need && mav_len >= mav_need)
-	  {
-	    uint32_t id = (mav_pkt[0] == 0xFE)
-	                ? mav_pkt[5]
-	                : (mav_pkt[7] | (mav_pkt[8] << 8) | ((uint32_t)mav_pkt[9] << 16));
-	    uint32_t limit = Mav_IsPriority(id) ? RADIO_Q_PRIO : RADIO_Q_MAX;
+  /* Cari magic byte MAVLink1 (0xFE) atau MAVLink2 (0xFD). */
+  if (mav_len == 0)
+  {
+    if (b != 0xFE && b != 0xFD)
+    {
+      mav_junk++;
+      return;
+    }
+    mav_pkt[0] = b;
+    mav_len = 1;
+    mav_need = 0;
+    mav_tick = HAL_GetTick();
+    return;
+  }
 
-	    if (Ring_Count(&radio_tx) + mav_len <= limit)
-	    {
-	      for (uint16_t i = 0; i < mav_len; i++) Ring_Put(&radio_tx, mav_pkt[i]);
-	      mav_ok++;
-	    }
-	    else
-	    {
-	      mav_drop++;
-	    }
-	    mav_len = 0;
-	    mav_need = 0;
-	  }
+  /* Pulih jika frame rusak atau ukurannya melewati buffer. */
+  if (mav_len >= MAV_MAX)
+  {
+    mav_len = 0;
+    mav_need = 0;
+    mav_junk++;
+    if (b == 0xFE || b == 0xFD)
+    {
+      mav_pkt[0] = b;
+      mav_len = 1;
+    }
+    mav_tick = HAL_GetTick();
+    return;
+  }
+
+  mav_pkt[mav_len++] = b;
+  mav_tick = HAL_GetTick();
+
+  /* Setelah byte length diterima, hitung ukuran frame total. */
+  if (mav_len == 2)
+  {
+    mav_need = (mav_pkt[0] == 0xFE ? 8U : 12U) + mav_pkt[1];
+  }
+  /* MAVLink2 incompat_flags bit 0 menandakan ada signature 13 byte. */
+  else if (mav_len == 3 && mav_pkt[0] == 0xFD && (mav_pkt[2] & 0x01U))
+  {
+    mav_need += 13U;
+  }
+
+  if (mav_need != 0 && mav_len >= mav_need)
+  {
+    uint32_t id = (mav_pkt[0] == 0xFE)
+                ? mav_pkt[5]
+                : ((uint32_t)mav_pkt[7] |
+                   ((uint32_t)mav_pkt[8] << 8) |
+                   ((uint32_t)mav_pkt[9] << 16));
+    uint32_t limit = Mav_IsPriority(id) ? RADIO_Q_PRIO : RADIO_Q_MAX;
+
+    if (Ring_Count(&radio_tx) + mav_len <= limit)
+    {
+      for (uint16_t i = 0; i < mav_len; i++)
+      {
+        if (!Ring_Put(&radio_tx, mav_pkt[i])) break;
+      }
+      mav_ok++;
+    }
+    else
+    {
+      mav_drop++;
+    }
+
+    mav_len = 0;
+    mav_need = 0;
+  }
 }
 /* USER CODE END 0 */
 
